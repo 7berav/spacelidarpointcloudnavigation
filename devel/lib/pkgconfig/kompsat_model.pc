@@ -1,0 +1,8 @@
+prefix=/home/smrl/3d_lidar_ws/devel
+
+Name: kompsat_model
+Description: Description of kompsat_model
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

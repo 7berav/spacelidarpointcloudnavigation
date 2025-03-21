@@ -1,0 +1,12 @@
+<launch>
+  <!-- Gazebo를 실행하면서 특정 world 파일을 로드 -->
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name" value="/home/smrl/3d_lidar_ws/src/kompsat_model/KOMPSAT_world.world"/>
+    <arg name="paused" value="false"/>
+    <arg name="use_sim_time" value="true"/>
+    <arg name="gui" value="true"/>
+    <arg name="headless" value="false"/>
+    <arg name="debug" value="false"/>
+  </include>
+</launch>
+

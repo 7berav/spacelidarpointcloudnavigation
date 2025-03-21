@@ -1,0 +1,7 @@
+digraph G {
+"world" -> "lidar_link"[label="Broadcaster: /static_transform_publisher_1741655691075407966\nAverage rate: 10000.000 Hz\nMost recent transform: 0.000 ( 294.154 sec old)\nBuffer length: 0.000 sec\n"];
+edge [style=invis];
+ subgraph cluster_legend { style=bold; color=black; label ="view_frames Result";
+"Recorded at time: 294.154"[ shape=plaintext ] ;
+ }->"world";
+}

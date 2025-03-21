@@ -1,0 +1,8 @@
+prefix=/home/smrl/3d_lidar_ws/devel
+
+Name: making_lidar
+Description: Description of making_lidar
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

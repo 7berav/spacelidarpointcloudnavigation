@@ -1,0 +1,2 @@
+kompsat_model:making_lidar:velodyne_simulator/velodyne_description:velodyne_simulator/velodyne_gazebo_plugins:velodyne_simulator/velodyne_simulator
+-DCATKIN_DEVEL_PREFIX=/home/smrl/3d_lidar_ws/devel -DCMAKE_INSTALL_PREFIX=/home/smrl/3d_lidar_ws/install -G Unix Makefiles
