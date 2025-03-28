@@ -5,15 +5,17 @@ import rospy
 from gazebo_msgs.srv import SetModelState
 from gazebo_msgs.msg import ModelState
 import math
-import tf
 from tf.transformations import quaternion_from_euler
 import numpy as np
+import tf2_ros
+import geometry_msgs.msg
 
 def move_model():
     rospy.init_node('gazebo_model_mover', anonymous=True)
     rospy.wait_for_service('/gazebo/set_model_state')  # Gazebo 서비스 대기
     set_state = rospy.ServiceProxy('/gazebo/set_model_state', SetModelState)  # 서비스 연결
 
+    # br = tf2_ros.TransformBroadcaster()
     rate = rospy.Rate(10)  # 10Hz (0.1초마다 위치 업데이트)
     t = -2000  # 시간 변수
 
@@ -29,7 +31,7 @@ def move_model():
 
         x = (2/n)*C1 + C2*math.cos(n*t) + C3*math.sin(n*t)
         y = -3*C1*t -2*C2*math.sin(n*t) + 2*C3*math.cos(n*t) + C4
-        z = 0  # 고정된 높이
+        z = 2  # 고정된 높이
 
         if t >= 0:
             yaw = math.atan2(-y, -x)
@@ -51,6 +53,19 @@ def move_model():
             set_state(model_state)
         except rospy.ServiceException as e:
             rospy.logerr("Service call failed: %s" % e)
+
+        tfs = geometry_msgs.msg.TransformStamped()
+        tfs.header.stamp = rospy.Time.now()
+        tfs.header.frame_id = "map"
+        tfs.child_frame_id = "lidar_link"
+        tfs.transform.translation.x = x
+        tfs.transform.translation.y = y
+        tfs.transform.translation.z = z
+        tfs.transform.rotation.x = q[0]
+        tfs.transform.rotation.y = q[1]
+        tfs.transform.rotation.z = q[2]
+        tfs.transform.rotation.w = q[3]
+        # br.sendTransform(tfs)
 
         t += 10  # 시간 업데이트
         rate.sleep()

@@ -1,13 +1,13 @@
 <?xml version="1.0" ?>
 <sdf version="1.6">
   <world name="default">
-    <include>
+    <!--include>
       <uri>model://ground_plane</uri>
-    </include>
+    </include-->
   
     <physics type="ode">
       <max_step_size>0.001</max_step_size>
-      <!--gravity>0 0 0</gravity-->
+      <gravity>0 0 0</gravity>
       <real_time_update_rate>1000</real_time_update_rate>
     </physics>
 
@@ -121,7 +121,7 @@
               <!--The horizontal beams-->
               <horizontal>
                 <!--The velodyne has 16 beams(vlp-16)-->
-                <samples>72</samples>
+                <samples>360</samples>
                 <!--Resolution is multipled by samples to determine number of simulated beams vs interpolated beams. See: http://sdformat.org/spec?ver=1.6&elem=sensor#horizontal_resolution-->
                 <resolution>1</resolution>
                 
@@ -133,10 +133,10 @@
               
               <!--add vertical scan-->
               <vertical>
-                <samples>36</samples>
+                <samples>180</samples>
                 <resolution>1</resolution>
-                <min_angle>1.308</min_angle>
-                <max_angle>1.832</max_angle>
+                <min_angle>1.57</min_angle>
+                <max_angle>2.09</max_angle>
               </vertical>
             </scan>
             

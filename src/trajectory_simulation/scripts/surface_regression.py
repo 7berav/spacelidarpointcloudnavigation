@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import numpy as np
-from sympy import symbols, expand, lambdify, diff, simplify
+from sympy import symbols, expand, lambdify, diff, simplify, Matrix, degree_list, S, Poly
 from itertools import combinations_with_replacement
 from skimage import measure
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -15,6 +15,8 @@ import sensor_msgs.point_cloud2 as pc2
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
 import trimesh
+from scipy.optimize import minimize
+from collections import OrderedDict
 
 def generate_random_points_on_hexagon_prism(N):
     points = []
@@ -329,11 +331,19 @@ def align_pointcloud_with_pca(points):
 def generate_homogeneous_terms(order):
     x, y, z = symbols('x y z')
     terms = []
-    for i in range(order + 1):
-        for j in range(order + 1 - i):
-            k = order - i - j
-            terms.append(x**i * y**j * z**k)
-    return terms
+
+    for max_power in range(order, -1, -1):
+        for j in range(order - max_power, -1, -1):
+            k = order - max_power - j
+
+            terms.append(x**max_power * y**j * z**k)
+            terms.append(y**max_power * z**j * x**k)
+            terms.append(z**max_power * x**j * y**k)
+
+    # 중복 제거 (순서 유지)
+    unique_terms = list(OrderedDict.fromkeys([simplify(t) for t in terms]))
+
+    return unique_terms
 
 # 2. 항 평가 함수
 def calculate_polynomial_matrix(points, symb_terms):
@@ -357,47 +367,41 @@ def build_polynomial_expression(symb_terms, beta):
     return sum(b * t for b, t in zip(beta, symb_terms))
 
 # 5. 시각화 함수
-def visualize_implicit_surface(f_expr, center_shift=None, level=1.0, grid_size=80, grid_range=6):
+def visualize_implicit_surface(f_expr, pointcloud, level=0.0, grid_size=80, grid_range=6):
     x, y, z = symbols('x y z')
-
-    if center_shift is not None:
-        f_expr = f_expr.subs({x: x - center_shift[0], y: y - center_shift[1], z: z - center_shift[2]})
-        f_expr = expand(f_expr - 1)
-
     f_func = lambdify((x, y, z), f_expr, modules='numpy')
 
-    # 그리드 생성
+    # 3D 그리드 생성
     grid_lin = np.linspace(-grid_range, grid_range, grid_size)
     X, Y, Z = np.meshgrid(grid_lin, grid_lin, grid_lin, indexing='ij')
     F = f_func(X, Y, Z)
+    F = np.nan_to_num(F, nan=1e6, posinf=1e6, neginf=-1e6)
 
-    # 등가면 추출
-    try:
-        verts, faces, _, _ = measure.marching_cubes(F, level=0.0)
-    except RuntimeError as e:
-        print("fail:", e)
-        return
+    # 등가면 추출 (수치 안정성 확인)
+    if not (F.min() <= level <= F.max()):
+        print(f"⚠️ Level {level} not in range ({F.min()}, {F.max()}) → using median level")
+        level = np.median(F)
 
-    # 좌표 정규화
-    scale = (2 * grid_range) / (grid_size - 1)
-    verts = verts * scale - grid_range
+    verts, faces, _, _ = measure.marching_cubes(F, level=level)
 
     # 시각화
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
-    h = PPm_use.copy()[:,2]
-    sc = ax.scatter(PPm_use[:, 0], PPm_use[:, 1], PPm_use[:, 2], c=h, cmap='jet', s=1)
+    sc = ax.scatter(pointcloud[:, 0], pointcloud[:, 1], pointcloud[:, 2],
+                    c=pointcloud[:, 2], cmap='jet', s=1)
     mesh = Poly3DCollection(verts[faces], alpha=0.6, facecolor=(0.99, 0.75, 0.12))
     ax.add_collection3d(mesh)
+
     ax.set_xlim(-grid_range, grid_range)
     ax.set_ylim(-grid_range, grid_range)
     ax.set_zlim(-grid_range, grid_range)
-    ax.set_title("6 order polynomial regression")
+    ax.set_title("6th-order polynomial fitted surface")
     plt.colorbar(sc)
     plt.tight_layout()
     plt.show()
 
     return verts, faces
+
 
 # === 메인 실행 ===
 
@@ -458,15 +462,28 @@ q_scipy = np.roll(q, -1)
 rotm = R.from_quat(q_scipy).as_matrix()
 PPmR_body = np.dot(PPm_body.copy(), rotm.T)
 
-PPm_use = PPm_body.copy()
+# PPm_use = PPm_body.copy()
+
+# -------------------- 초기 데이터 로딩 --------------------
+data_path = "/home/smrl/cylinder_high.npy"
+data = np.load(data_path)
+print(f"row {data.shape[0]}, column {data.shape[1]}")
+shift_real = np.array([0.5, -1, -0.30])
+PPm_use = data + shift_real
 
 # 중심 이동
 center_shift = np.median(PPm_use, axis=0)
-PPm_shift = PPm_use - center_shift
+scale_shift = np.std(PPm_use, axis=0)
+PPm_shift = (PPm_use - center_shift) / scale_shift
 
 # 항 생성 및 회귀
 order = 6
 terms = generate_homogeneous_terms(order)
+
+A = calculate_polynomial_matrix(PPm_shift, terms)
+cond_A = np.linalg.cond(A)
+print(f"Condition number of A: {cond_A}")
+
 beta, error = regression_polynomial(PPm_shift, terms)
 f_expr = build_polynomial_expression(terms, beta)
 
@@ -477,7 +494,7 @@ extent = np.max(max_bounds - min_bounds) / 2
 grid_range = extent
 
 # 시각화
-verts, faces = visualize_implicit_surface(f_expr, center_shift=center_shift, level=1.0, grid_range=grid_range)
+# verts, faces = visualize_implicit_surface(f_expr, center_shift=center_shift, level=1.0, grid_range=grid_range)
 
 x, y, z = symbols('x y z')
 dfdx = diff(f_expr, x)
@@ -510,18 +527,117 @@ for _ in range(numIterations):
     f_expr = build_polynomial_expression(terms, beta)
     f_numeric = lambdify((x, y, z), f_expr, 'numpy')
 
-f_expr_final = f_expr.subs({x: x - shift_sum[0], y: y - shift_sum[1], z: z - shift_sum[2]})
-f_expr_final = expand(f_expr_final - 1)
+shift_total = shift_sum * scale_shift
+total_offset = center_shift + shift_total
 
-verts_2, faces_2 = visualize_implicit_surface(f_expr_final)
+scale_val = np.median(f_numeric(PPm_shift[:, 0], PPm_shift[:, 1], PPm_shift[:, 2]))
+f_expr_scaled = f_expr / scale_val
+f_expr_final = expand(f_expr_scaled - 1)
+
+f_expr_final = f_expr_final.subs({x: (x - total_offset[0]) / scale_shift[0], y: (y - total_offset[1]) / scale_shift[1], z: (z - total_offset[2]) / scale_shift[2]})
+f_expr_final = expand(f_expr_final)
+
+PPm_aligned = PPm_use - total_offset
+
+print("Shift sum (normalized):", shift_sum)
+print("Shift total (original space):", shift_total)
+print("Center shift:", center_shift)
+print("Total offset (for surface correction):", total_offset)
+
+# 중심좌표 평균
+print("PPm_aligned mean:", np.mean(PPm_aligned, axis=0))
+
+
+f_test = lambdify((x, y, z), f_expr_final, modules='numpy')
+values = f_test(PPm_aligned[:, 0], PPm_aligned[:, 1], PPm_aligned[:, 2])
+print("f_expr_final evaluated on aligned pointcloud:")
+print("  min =", np.min(values))
+print("  max =", np.max(values))
+print("  median =", np.median(values))
+print("  mean =", np.mean(values))
+
+verts_2, faces_2 = visualize_implicit_surface(f_expr_final, PPm_aligned)
 
 def save_surface_as_stl(verts, faces, filename="surface_mesh.stl"):
     mesh = trimesh.Trimesh(vertices=verts, faces=faces)
     mesh.export(filename)
 
-save_surface_as_stl(verts_2, faces_2)
+# save_surface_as_stl(verts_2, faces_2)
 
-try:
-    kompsat_data_publisher(PPm_use, verts_2, faces_2)
-except rospy.ROSInterruptException:
-    pass
+# define rotation matrix
+q0, q1, q2, q3 = symbols('q0 q1 q2 q3')
+x, y, z = symbols('x y z')
+
+Rq = Matrix([
+    [q0**2+q1**2 - q2**2 - q3**2, 2*(q1*q2 - q0*q3),     2*(q1*q3 + q0*q2)],
+    [2*(q2*q1 + q0*q3),   q0**2 - q1**2 + q2**2 - q3**2, 2*(q2*q3 - q0*q1)],
+    [2*(q3*q1 - q0*q2),   2*(q3*q2 + q0*q1),     q0**2 - q1**2 - q2**2 + q3**2]
+])
+
+xyz = Matrix([x, y, z])
+xyz_rotated = Rq @ xyz
+
+# translate existing polynomial into rotated position
+# f_rotated = f_expr.subs({x: xyz_rotated[0], y: xyz_rotated[1], z: xyz_rotated[2]})
+# f_rotated = expand(f_rotated)
+
+f_rotated = 0
+for coeff, monom in zip(beta, terms):
+    term_rot = monom.subs({x: xyz_rotated[0], y: xyz_rotated[1], z: xyz_rotated[2]})
+    f_rotated += coeff * term_rot
+
+# desired terms
+monList = [
+    (0, 6, 0),
+    (2, 4, 0),
+    (4, 2, 0),
+    (6, 0, 0),
+    (0, 0, 6)
+]
+
+f_dict = f_rotated.as_coefficients_dict()
+unused_coeffs = []
+
+for monomial, coeff in f_dict.items():
+    p = monomial.as_powers_dict()
+    degs = (p.get(x, 0), p.get(y, 0), p.get(z, 0))
+    
+    if degs not in monList:
+        unused_coeffs.append(coeff)
+
+# define objective function
+coeff_expr = sum([c**2 for c in unused_coeffs])
+f_norm_func = lambdify((q0, q1, q2, q3), coeff_expr, 'numpy')
+
+def objective(q_vec):
+    return f_norm_func(q_vec[0], q_vec[1], q_vec[2], q_vec[3])
+
+def constraint_unit_quaternion(q_vec):
+    return np.dot(q_vec, q_vec) - 1
+
+cons = {'type': 'eq', 'fun': constraint_unit_quaternion}
+init_q = np.array([1.0, 0.0, 0.0, 0.0])
+res = minimize(objective, init_q, constraints=cons, options={'disp': True})
+
+q_opt = res.x / np.linalg.norm(res.x)
+
+# apply optimize rotation and reconstruct surface
+R_scipy = R.from_quat(np.roll(q_opt, -1)).as_matrix()
+PPm_shift_rot = (R_scipy @ PPm_shift.T).T
+
+# make optimized surface on rotational frame
+xyz_rotated_opt = Matrix(R_scipy) @ Matrix([x, y, z])
+f_rotated_final = f_expr.subs({x:xyz_rotated_opt[0], y:xyz_rotated_opt[1], z:xyz_rotated_opt[2]})
+f_rotated_final = expand(f_rotated_final - 1)
+
+# visualize
+f_func_final = lambdify((x, y, z), f_rotated_final, 'numpy')
+verts_3, faces_3 = visualize_implicit_surface(f_rotated_final, PPm_aligned)
+
+# save stl
+# save_surface_as_stl(verts_3, faces_3, "rotated_surface.stl")
+
+# try:
+#     kompsat_data_publisher(PPm_use, verts_2, faces_2)
+# except rospy.ROSInterruptException:
+#     pass
