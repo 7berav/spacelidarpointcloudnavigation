@@ -1,18 +1,13 @@
-# ICP 적용 전체 파이프라인 (정합 안정성 개선 버전)
-# .bag 파일로부터 프레임별로 PointCloud 추출하고 ICP 정렬 수행
-
 import open3d as o3d
 import numpy as np
 import pyrealsense2 as rs
 import os
 import copy
 
-# === 1. 설정 ===
-bag_file = "20250717_133903.bag"  # 예담이의 .bag 파일 경로
-output_dir = "frames"  # 추출된 프레임 저장 폴더
+bag_file = "20250717_133903.bag" # realsense-viewer로 녹화한 .bag 파일
+output_dir = "frames"
 os.makedirs(output_dir, exist_ok=True)
 
-# === 2. RealSense 파이프라인 설정 ===
 pipeline = rs.pipeline()
 config = rs.config()
 config.enable_device_from_file(bag_file, repeat_playback=False)
@@ -22,7 +17,6 @@ profile = pipeline.get_active_profile()
 depth_sensor = profile.get_device().first_depth_sensor()
 depth_scale = depth_sensor.get_depth_scale()
 
-# === 3. 프레임 추출 및 PointCloud 생성 ===
 pcl_list = []
 frame_count = 0
 
@@ -34,7 +28,6 @@ while True:
         if not depth:
             continue
 
-        # depth to pointcloud
         pc = rs.pointcloud()
         pc.map_to(depth)
         points = pc.calculate(depth)
@@ -43,20 +36,16 @@ while True:
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(vtx)
 
-        # 필터링 (1m 이내)
         pcd = pcd.select_by_index([
             i for i, pt in enumerate(pcd.points)
             if np.linalg.norm(pt) < 1.0
         ])
 
-        # downsample
         pcd = pcd.voxel_down_sample(0.01)
 
-        # normal 계산
         pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30))
         pcd.orient_normals_consistent_tangent_plane(30)
 
-        # 저장
         ply_path = os.path.join(output_dir, f"frame_{frame_count:03d}.ply")
         o3d.io.write_point_cloud(ply_path, pcd)
         pcl_list.append(pcd)
@@ -70,7 +59,6 @@ while True:
 
 pipeline.stop()
 
-# === 4. 프레임 간 ICP 정합 ===
 transforms = [np.identity(4)]
 accumulated_pcd = copy.deepcopy(pcl_list[0])
 
@@ -91,6 +79,82 @@ for i in range(1, len(pcl_list)):
     aligned = copy.deepcopy(source).transform(transforms[-1])
     accumulated_pcd += aligned
 
-# === 5. 정합 결과 저장 ===
-o3d.io.write_point_cloud("merged_icp_result.ply", accumulated_pcd)
-# o3d.visualization.draw_geometries([accumulated_pcd])  # 시각화는 OpenGL 문제 있으면 주석 처리
+def clean_and_isolate_object(pcd: o3d.geometry.PointCloud,
+                             voxel=0.005,
+                             nb_neighbors=20, std_ratio=2.0,
+                             plane_dist=0.008, ransac_n=3, num_iter=2000,
+                             min_plane_points_ratio=0.02,
+                             keep_horizontal=True, keep_vertical=True,
+                             horizontal_cos_thresh=0.95,
+                             vertical_cos_thresh=0.95,
+                             gravity_dir=np.array([0, -1, 0]),
+                             view_dir=np.array([0, 0, 1])):
+    pcd = pcd.voxel_down_sample(voxel)
+    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+    if len(pcd.points) == 0:
+        return pcd
+
+    pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel*6, max_nn=50))
+    pcd.normalize_normals()
+
+    total_pts = len(pcd.points)
+    working = pcd
+
+    def is_horizontal(normal):
+        c = np.abs(float(np.dot(normal, gravity_dir)))
+        return c >= horizontal_cos_thresh
+
+    def is_vertical(normal):
+        c = np.abs(float(np.dot(normal, view_dir)))
+        return c >= vertical_cos_thresh
+
+    for _ in range(8):
+        if len(working.points) < 500:
+            break
+        plane_model, inliers = working.segment_plane(distance_threshold=plane_dist,
+                                                     ransac_n=ransac_n,
+                                                     num_iterations=num_iter)
+        [a, b, c, d] = plane_model
+        n = np.array([a, b, c], dtype=float)
+        n = n / (np.linalg.norm(n) + 1e-12)
+
+        inlier_ratio = len(inliers) / max(1, len(working.points))
+        if inlier_ratio < min_plane_points_ratio:
+            break
+
+        remove_this_plane = False
+        if keep_horizontal and is_horizontal(n):
+            remove_this_plane = True
+        if keep_vertical and is_vertical(n):
+            remove_this_plane = True
+
+        if remove_this_plane:
+            working = working.select_by_index(inliers, invert=True)
+        else:
+            break
+
+    if len(working.points) == 0:
+        return working
+    labels = np.array(working.cluster_dbscan(eps=voxel*6, min_points=50, print_progress=False))
+    if labels.max() < 0:
+        candidate = working
+    else:
+        largest_label = int(np.bincount(labels[labels >= 0]).argmax())
+        idx = np.where(labels == largest_label)[0].tolist()
+        candidate = working.select_by_index(idx)
+
+    pts = np.asarray(candidate.points)
+    filtered_idx = np.where(np.linalg.norm(pts, axis=1) > 0.05)[0].tolist()
+    candidate = candidate.select_by_index(filtered_idx)
+
+    candidate, _ = candidate.remove_radius_outlier(nb_points=30, radius=voxel*8)
+    return candidate
+
+object_only = clean_and_isolate_object(accumulated_pcd,
+                                       voxel=0.005,
+                                       plane_dist=0.008,
+                                       horizontal_cos_thresh=0.93,
+                                       vertical_cos_thresh=0.93)
+
+o3d.io.write_point_cloud("merged_icp_object_only.ply", object_only)
+print(f"Done. merged_icp_result.ply (전체) / merged_icp_object_only.ply (물체만) 저장됨")
